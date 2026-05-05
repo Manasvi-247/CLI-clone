@@ -1,80 +1,94 @@
 # Website Clone Agent
 
-A conversational CLI agent that clones websites by inspecting them with a real headless browser (Playwright) and writing original HTML/CSS/JS that reproduces the look and structure.
+A conversational CLI agent that clones websites. You chat with it in the terminal; it drives a real headless Chromium (via Playwright) to inspect the live page, then writes its own HTML/CSS/JS that reproduces the look.
 
-The agent operates in a **START → THINK → TOOL → OBSERVE → OUTPUT** loop, similar to how Cursor/Windsurf agents reason step-by-step. You chat with it in the terminal; it loads the target site in Chromium, extracts text and computed styles, and assembles a clean standalone clone in a folder of your choice.
-
-Built for: Scaler Academy — AI Agent CLI Tool assignment.
+Built for the Scaler **AI Agent CLI Tool** assignment.
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Install deps
 npm install
 npx playwright install chromium
-
-# 2. Add your Gemini API key
-cp .env.example .env
-# edit .env and paste your key — get one free at https://aistudio.google.com/apikey
-
-# 3. Run
-npm start
+cp .env.example .env       # paste a Groq or Gemini key
+node index.js
 ```
 
-Then in the prompt, type something like:
+Then in the prompt:
 
 ```
-clone https://sst-dashboard.com/ into sst_clone
+you > clone https://www.scaler.com/ into scaler_clone
 ```
 
-When it finishes, open the generated `sst_clone/index.html` in your browser.
+When the agent finishes, open `scaler_clone/index.html` in a browser, or run:
+
+```bash
+npx serve scaler_clone -l 8000
+```
 
 ---
 
-## CLI commands
+## CLI
 
-- Type any natural-language instruction to drive the agent.
-- `/reset` — clear conversation history.
-- `/exit` — quit.
+| Input | Effect |
+|---|---|
+| any natural-language instruction | drives the agent |
+| `/reset` | clear conversation history (keeps the process alive) |
+| `/exit` | quit cleanly |
+| `Ctrl+C` | abort mid-loop |
 
 ---
 
-## How it works
+## Architecture
 
-The agent uses the OpenAI SDK pointed at Google's OpenAI-compatible Gemini endpoint. Each turn it emits exactly one JSON object with a `step` field. The loop interprets the step and either prints reasoning, executes a tool, or finishes.
+The agent runs in a strict **START → THINK → TOOL → OBSERVE → OUTPUT** loop. Each LLM turn emits exactly one JSON object with a `step` field. The runner parses it, runs the tool if needed, appends the result as an OBSERVE message, and loops again until the model emits `OUTPUT`.
 
-### Tools wired into the agent
+```
+user msg
+  └─► [START] [THINK]* [TOOL → OBSERVE]+ [THINK]* [OUTPUT]
+                              │
+                              └─ Playwright / fs / shell
+```
+
+### Tools
 
 | Tool | Purpose |
 |---|---|
-| `openPage({url})` | Launch headless Chromium and navigate to the URL. |
-| `listSelectors()` | Discover which common selectors (header, nav, section, footer, etc.) exist. |
-| `extractText({selector})` | Read `innerText` of a chosen element (truncated). |
-| `extractStyles({selector})` | Read computed CSS — colors, fonts, spacing — to capture the design language. |
-| `extractHTML({selector})` | Read `outerHTML` for structural reference. |
-| `listImages({selector, limit})` | List image URLs in a section. |
+| `openPage({url})` | Launch headless Chromium and navigate. |
+| `listSelectors()` | Count common selectors (header, nav, section, h1, etc.). |
+| `extractText({selector})` | innerText of the first match. |
+| `extractStyles({selector})` | Computed CSS — colors, fonts, spacing. |
+| `extractHTML({selector})` | outerHTML (truncated). |
+| `extractAllSections()` | One-shot dump of header + hero + every body section + footer. |
+| `extractBackgroundLayers()` | Inline-style absolute overlay divs that build layered glow backgrounds. |
+| `listImages({selector, limit})` | image src URLs in a section. |
 | `downloadImage({url, savePath})` | Save an image locally. |
-| `screenshot({savePath, fullPage})` | Capture a reference screenshot. |
-| `writeFile({path, content})` | Write a file (creates parent dirs). |
-| `executeCommand({cmd})` | Run shell commands (mkdir, ls, etc.). |
-| `closeBrowser()` | Tear down the browser at the end. |
+| `screenshot({savePath, fullPage})` | Reference screenshot. |
+| `writeFile({path, content})` | Create a file (and parent dirs). |
+| `readFile({path})` | Read a file (for follow-up edits). |
+| `executeCommand({cmd})` | Run a shell command. |
+| `closeBrowser()` | Tear down the browser. |
 
-### Why Playwright + LLM, not just LLM
+### Resilience
 
-Asking an LLM to produce a clone from memory yields a generic page. With Playwright in the loop, the agent reads the **real** color palette, fonts, nav labels, and section headlines from the live site, then asks the LLM to assemble fresh, semantic HTML/CSS using those tokens. The result both *looks* like the source and is clean, original code that renders standalone.
+- **Multi-key rotation.** If `GROQ_API_KEYS` or `GEMINI_API_KEYS` is set with comma-separated keys, the agent rotates to the next key on 429 / 503 with per-key cooldowns.
+- **Brace-balanced JSON parser.** Tolerates the model emitting multiple JSON objects in one response (extracts only the first balanced one).
+- **Mid-loop pruning.** Older OBSERVE messages get truncated to keep request size under per-minute token caps.
+- **Conversational memory.** The `messages` array persists across turns, so follow-ups like `make the hero text larger` work without re-recon.
 
 ---
 
 ## Configuration
 
-`.env` keys:
+`.env` keys (all optional unless noted):
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GEMINI_API_KEY` | — | Required. Free key from Google AI Studio. |
-| `MODEL` | `gemini-2.5-flash` | Any Gemini model id is accepted. |
+| `PROVIDER` | auto | `groq` or `gemini`. Auto-detects from whichever key is set. |
+| `GROQ_API_KEY` / `GROQ_API_KEYS` | — | Free at <https://console.groq.com/keys>. Use comma-separated for rotation. |
+| `GEMINI_API_KEY` / `GEMINI_API_KEYS` | — | Free at <https://aistudio.google.com/apikey>. |
+| `MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` (groq) / `gemini-2.5-flash` (gemini) | Any provider-supported model id. |
 
 ---
 
@@ -82,21 +96,50 @@ Asking an LLM to produce a clone from memory yields a generic page. With Playwri
 
 ```
 .
-├── index.js          # Agent loop, tools, CLI
+├── index.js                     # everything — agent loop, tools, CLI, key pool
 ├── package.json
 ├── .env.example
 ├── README.md
-└── sst_clone/        # Generated by the agent (sample output)
+└── scaler_clone/                # sample output (generated by the agent)
     ├── index.html
-    ├── styles.css
-    └── script.js
+    ├── reference.png            # full-page screenshot of the source
+    ├── assets/
+    │   ├── scaler-logo.png
+    │   ├── script.js
+    │   └── styles/
+    │       ├── tokens.css       # :root variables, reset, .container, .hl
+    │       ├── header.css       # sticky nav
+    │       ├── hero.css         # eyebrow, h1 with gradient text, marquee
+    │       ├── sections.css     # Why Scaler dark panel + Frontier AI light
+    │       └── footer.css       # 4-column grid + link strips + watermark
+    └── ...
 ```
+
+CSS is split across 5 files so each `writeFile` call stays under the model's per-minute token cap.
+
+---
+
+## Code docs
+
+Source-level documentation lives as JSDoc-style header comments inside `index.js`. The major sections:
+
+- **Tool definitions** (lines ~25-220) — each tool has a 1-line `// Tool: …` comment describing its contract.
+- **`KeyPool` class** — provider-agnostic API key rotator with cooldowns.
+- **`callLLMWithRotation`** — request-with-retry that rotates keys on 429/503 and exponentially backs off when all keys are cooling.
+- **`runAgentLoop`** — the START/THINK/TOOL/OBSERVE/OUTPUT state machine.
+- **`safeParseJSON`** — brace-balanced first-object extractor.
+- **`pruneMessageHistory`** — truncates older OBSERVE payloads to keep requests under TPM caps.
+- **`pickProvider`** — resolves Groq vs Gemini config from `.env`.
+- **`main`** — readline interactive shell.
 
 ---
 
 ## Troubleshooting
 
-- **`Missing GEMINI_API_KEY`** — paste your key in `.env`.
-- **Playwright errors on first run** — make sure you ran `npx playwright install chromium`.
-- **Agent loops without finishing** — type `/reset` and try again with a clearer instruction.
-- **Generated page looks broken** — re-run with the same instruction; the agent often produces better output on the second pass once it has built memory of selectors that work.
+| Symptom | Fix |
+|---|---|
+| `No usable API keys found` | Paste a Groq or Gemini key into `.env`. |
+| `playwright launch failed` | `npx playwright install chromium`. |
+| `429 / TPM exceeded` repeatedly | Lower the model (e.g. `MODEL=meta-llama/llama-4-scout-17b-16e-instruct` for max Groq TPM), or wait 60s. |
+| Agent emits empty `<header></header>` etc. | Llama undershot; either swap to Gemini, or hand-fill the section once and ask it to iterate (`make the hero text larger`). |
+| Page renders unstyled | Check the 5 stylesheet `<link>` paths in the generated `index.html`. |
